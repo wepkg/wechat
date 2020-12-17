@@ -1,4 +1,4 @@
-package wx
+package pkg
 
 import (
 	"crypto/aes"

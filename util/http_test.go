@@ -1,4 +1,4 @@
-package wx
+package util
 
 import (
 	"testing"
