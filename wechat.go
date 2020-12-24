@@ -6,71 +6,34 @@ import (
 	"io"
 	"net/http"
 	"sort"
+
+	"github.com/wepkg/wechat/message"
 )
 
-//Config ..
-type Config struct {
-	Appid  string
-	Secret string
-	Token  string
-	AESKey string
+type App struct {
+	*Core
 }
 
-// Option ..
-type Option func(*Config)
-
-// Appid set Appid
-func Appid(v string) Option {
-	return func(c *Config) {
-		c.Appid = v
-	}
-}
-
-// Secret set Secret
-func Secret(v string) Option {
-	return func(c *Config) {
-		c.Secret = v
-	}
-}
-
-// Token set Token
-func Token(v string) Option {
-	return func(c *Config) {
-		c.Token = v
-	}
-}
-
-// AESKey set AESKey
-func AESKey(v string) Option {
-	return func(c *Config) {
-		c.AESKey = v
-	}
-}
-
-// New a app service
+// New a Core service
 func New(opts ...Option) *App {
-	conf := &Config{}
+	core := &Core{}
 	for _, opt := range opts {
-		opt(conf)
+		opt(core)
 	}
 	return &App{
-		Config: conf,
+		Core: core,
 	}
-}
-
-// App ..
-type App struct {
-	*Config
 }
 
 // Validate ..
-func (a *App) Validate(h *handler) bool {
-	signature := h.Query("signature")
-	timestamp := h.Query("timestamp")
-	nonce := h.Query("nonce")
-	// echostr := h.Query("echostr")
-	return signature == sign(h.Token, timestamp, nonce)
-}
+// func (a *App) Validate(h *handler) bool {
+// 	signature := h.Query("signature")
+// 	timestamp := h.Query("timestamp")
+// 	nonce := h.Query("nonce")
+// 	// echostr := h.Query("echostr")
+// 	return signature == sign(h.Token, timestamp, nonce)
+// }
+
 func sign(params ...string) string {
 	sort.Strings(params)
 	h := sha1.New()
@@ -93,12 +56,13 @@ func (h *service) Query(k string) string {
 
 func (h *service) Render(code int, r render) {
 	h.w.WriteHeader(code)
-	header := h.w.Header()
-	if val := header["Content-Type"]; len(val) == 0 {
-		header["Content-Type"] = r.ContentType()
+	if r != nil {
+		header := h.w.Header()
+		if val := header["Content-Type"]; len(val) == 0 {
+			header["Content-Type"] = r.ContentType()
+		}
+		h.w.Write(r.Body())
 	}
-
-	h.w.Write(r.Body())
 }
 
 type render interface {
@@ -131,24 +95,14 @@ func (a *App) Offiaccount() *Offiaccount {
 	}
 }
 
-type httpHandler interface {
-	Handler(w http.ResponseWriter, r *http.Request)
-}
-
-// Offiaccount ..
-type Offiaccount struct {
-	*App
-	httpHandler
-	Reply (func())
-}
-
-// Handler ..
-func (a *Offiaccount) Handler(w http.ResponseWriter, r *http.Request) {
+// Notify ..
+func (a *App) Notify(w http.ResponseWriter, r *http.Request) {
 	srv := &service{
 		w: w,
 		r: r,
 	}
 	if !a.Validate(srv) {
+		srv.Render(400, nil)
 		return
 	}
 	echostr := srv.Query("echostr")
@@ -158,7 +112,22 @@ func (a *Offiaccount) Handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Notify 微信公众号(mp)
-func (a *App) Notify() {
+// type httpHandler interface {
+// 	Handler(w http.ResponseWriter, r *http.Request)
+// }
 
+// Offiaccount ..
+type Offiaccount struct {
+	*App
+	// httpHandler
+	Reply            (func())
+	ReceivingHandler ReceivingHandler
+}
+
+// ReceivingHandler ..
+type ReceivingHandler func(message.Context)
+
+// SetReceivingHandler ..
+func (o *Offiaccount) SetReceivingHandler(h ReceivingHandler) {
+	o.ReceivingHandler = h
 }
