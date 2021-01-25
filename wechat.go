@@ -1,12 +1,11 @@
 package wechat
 
 import (
-	"crypto/sha1"
-	"fmt"
-	"io"
-	"net/http"
-	"sort"
+	"github.com/wepkg/wechat/auth"
+	"github.com/wepkg/wechat/util"
 )
+
+const WechatURL = "https://api.weixin.qq.com"
 
 //Config ..
 type Config struct {
@@ -50,19 +49,56 @@ func AESKey(v string) Option {
 // New a app service
 func New(opts ...Option) *App {
 	conf := &Config{}
+	// conf.WechatURL = WechatURL
 	for _, opt := range opts {
 		opt(conf)
 	}
+	client, _ := util.NewClient(
+		util.WithEndpointBase(WechatURL),
+	)
 	return &App{
 		Config: conf,
+		Client: client,
 	}
 }
 
 // App ..
 type App struct {
-	*Config
+	Config *Config
+	Auth   auth.Auth
+	Client *util.Client
 }
 
+// Offiaccount 公众号
+func (a *App) Offiaccount() *Offiaccount {
+	return &Offiaccount{App: a}
+}
+
+// Miniprogram 小程序
+func (a *App) Miniprogram() *Miniprogram {
+	return &Miniprogram{App: a}
+}
+
+// Result ..
+type Result struct {
+	Errcode int    `json:"errcode"` //错误码
+	Errmsg  string `json:"Errmsg"`  //错误信息
+}
+
+// -1	系统繁忙，此时请开发者稍候再试
+// 0	请求成功
+// 40029	code 无效
+// 45011	频率限制，每个用户每分钟100次
+
+// IsError ..
+func (r *Result) IsError() bool {
+	if r.Errcode != 0 {
+		return true
+	}
+	return false
+}
+
+/*
 // Validate ..
 func (a *App) Validate(h *handler) bool {
 	signature := h.Query("signature")
@@ -124,23 +160,11 @@ func (r xmlRender) Body() []byte {
 	return r
 }
 
-// Offiaccount 公众号
-func (a *App) Offiaccount() *Offiaccount {
-	return &Offiaccount{
-		App: a,
-	}
-}
-
 type httpHandler interface {
 	Handler(w http.ResponseWriter, r *http.Request)
 }
 
-// Offiaccount ..
-type Offiaccount struct {
-	*App
-	httpHandler
-	Reply (func())
-}
+
 
 // Handler ..
 func (a *Offiaccount) Handler(w http.ResponseWriter, r *http.Request) {
@@ -162,3 +186,4 @@ func (a *Offiaccount) Handler(w http.ResponseWriter, r *http.Request) {
 func (a *App) Notify() {
 
 }
+*/

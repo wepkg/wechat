@@ -1,297 +1,229 @@
 package util
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
+	"crypto/hmac"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"hash"
+	"strings"
 )
 
-// PaddingMode aes padding mode
-type PaddingMode string
-
+// 微信签名算法方式
 const (
-	// ZERO zero padding mode
-	ZERO PaddingMode = "ZERO"
-	// PKCS5 PKCS#5 padding mode
-	PKCS5 PaddingMode = "PKCS#5"
-	// PKCS7 PKCS#7 padding mode
-	PKCS7 PaddingMode = "PKCS#7"
+	SignTypeMD5        = `MD5`
+	SignTypeHMACSHA256 = `HMAC-SHA256`
 )
 
-// CBCCrypto aes-cbc crypto
-type CBCCrypto struct {
-	key []byte
-	iv  []byte
-}
-
-// NewCBCCrypto returns new aes-cbc crypto
-func NewCBCCrypto(key, iv []byte) *CBCCrypto {
-	return &CBCCrypto{
-		key: key,
-		iv:  iv,
-	}
-}
-
-// Encrypt aes-cbc encrypt
-func (c *CBCCrypto) Encrypt(plainText []byte, mode PaddingMode) ([]byte, error) {
-	block, err := aes.NewCipher(c.key)
-
+// Encrypt 加密消息
+func Encrypt(random, rawXMLMsg []byte, appID, aesKey string) (encrtptMsg []byte, err error) {
+	defer func() {
+		if e := recover(); e != nil {
+			err = fmt.Errorf("panic error: err=%v", e)
+			return
+		}
+	}()
+	var key []byte
+	key, err = aesKeyDecode(aesKey)
 	if err != nil {
-		return nil, err
+		panic(err)
 	}
-
-	if len(c.iv) != block.BlockSize() {
-		return nil, errors.New("yiigo: IV length must equal block size")
-	}
-
-	switch mode {
-	case ZERO:
-		plainText = ZeroPadding(plainText, block.BlockSize())
-	case PKCS5:
-		plainText = PKCS5Padding(plainText, block.BlockSize())
-	case PKCS7:
-		plainText = PKCS5Padding(plainText, len(c.key))
-	}
-
-	cipherText := make([]byte, len(plainText))
-
-	blockMode := cipher.NewCBCEncrypter(block, c.iv)
-	blockMode.CryptBlocks(cipherText, plainText)
-
-	return cipherText, nil
+	ciphertext := AESEncrypt(random, rawXMLMsg, appID, key)
+	encrtptMsg = []byte(base64.StdEncoding.EncodeToString(ciphertext))
+	return
 }
 
-// Decrypt aes-cbc decrypt
-func (c *CBCCrypto) Decrypt(cipherText []byte, mode PaddingMode) ([]byte, error) {
-	block, err := aes.NewCipher(c.key)
+// AESEncrypt ciphertext = AES_Encrypt[random(16B) + msg_len(4B) + rawXMLMsg + appId]
+//参考：github.com/chanxuehong/wechat.v2
+func AESEncrypt(random, rawXMLMsg []byte, appID string, aesKey []byte) (ciphertext []byte) {
+	const (
+		BlockSize = 32            // PKCS#7
+		BlockMask = BlockSize - 1 // BLOCK_SIZE 为 2^n 时, 可以用 mask 获取针对 BLOCK_SIZE 的余数
+	)
 
+	appIDOffset := 20 + len(rawXMLMsg)
+	contentLen := appIDOffset + len(appID)
+	amountToPad := BlockSize - contentLen&BlockMask
+	plaintextLen := contentLen + amountToPad
+
+	plaintext := make([]byte, plaintextLen)
+
+	// 拼接
+	copy(plaintext[:16], random)
+	encodeNetworkByteOrder(plaintext[16:20], uint32(len(rawXMLMsg)))
+	copy(plaintext[20:], rawXMLMsg)
+	copy(plaintext[appIDOffset:], appID)
+
+	// PKCS#7 补位
+	for i := contentLen; i < plaintextLen; i++ {
+		plaintext[i] = byte(amountToPad)
+	}
+
+	// 加密
+	block, err := aes.NewCipher(aesKey)
 	if err != nil {
-		return nil, err
+		panic(err)
 	}
+	mode := cipher.NewCBCEncrypter(block, aesKey[:16])
+	mode.CryptBlocks(plaintext, plaintext)
 
-	if len(c.iv) != block.BlockSize() {
-		return nil, errors.New("yiigo: IV length must equal block size")
-	}
-
-	plainText := make([]byte, len(cipherText))
-
-	blockMode := cipher.NewCBCDecrypter(block, c.iv)
-	blockMode.CryptBlocks(plainText, cipherText)
-
-	switch mode {
-	case ZERO:
-		plainText = ZeroUnPadding(plainText)
-	case PKCS5:
-		plainText = PKCS5Unpadding(plainText, block.BlockSize())
-	case PKCS7:
-		plainText = PKCS5Unpadding(plainText, len(c.key))
-	}
-
-	return plainText, nil
+	ciphertext = plaintext
+	return
 }
 
-// ECBCrypto aes-ecb crypto
-type ECBCrypto struct {
-	key []byte
-}
-
-// NewECBCrypto returns new aes-ecb crypto
-func NewECBCrypto(key []byte) *ECBCrypto {
-	return &ECBCrypto{key: key}
-}
-
-// Encrypt aes-ecb encrypt
-func (c *ECBCrypto) Encrypt(plainText []byte, mode PaddingMode) ([]byte, error) {
-	block, err := aes.NewCipher(c.key)
-
+// Decrypt 消息解密
+func Decrypt(appID, encryptedMsg, aesKey string) (random, rawMsgXMLBytes []byte, err error) {
+	defer func() {
+		if e := recover(); e != nil {
+			err = fmt.Errorf("panic error: err=%v", e)
+			return
+		}
+	}()
+	var encryptedMsgBytes, key, getAppIDBytes []byte
+	encryptedMsgBytes, err = base64.StdEncoding.DecodeString(encryptedMsg)
 	if err != nil {
-		return nil, err
+		return
 	}
-
-	switch mode {
-	case ZERO:
-		plainText = ZeroPadding(plainText, block.BlockSize())
-	case PKCS5:
-		plainText = PKCS5Padding(plainText, block.BlockSize())
-	case PKCS7:
-		plainText = PKCS5Padding(plainText, len(c.key))
-	}
-
-	cipherText := make([]byte, len(plainText))
-
-	blockMode := NewECBEncrypter(block)
-	blockMode.CryptBlocks(cipherText, plainText)
-
-	return cipherText, nil
-}
-
-// Decrypt aes-ecb decrypt
-func (c *ECBCrypto) Decrypt(cipherText []byte, mode PaddingMode) ([]byte, error) {
-	block, err := aes.NewCipher(c.key)
-
+	key, err = aesKeyDecode(aesKey)
 	if err != nil {
-		return nil, err
+		panic(err)
 	}
-
-	plainText := make([]byte, len(cipherText))
-
-	blockMode := NewECBDecrypter(block)
-	blockMode.CryptBlocks(plainText, cipherText)
-
-	switch mode {
-	case ZERO:
-		plainText = ZeroUnPadding(plainText)
-	case PKCS5:
-		plainText = PKCS5Unpadding(plainText, block.BlockSize())
-	case PKCS7:
-		plainText = PKCS5Unpadding(plainText, len(c.key))
-	}
-
-	return plainText, nil
-}
-
-// RSAEncrypt rsa encryption with public key
-func RSAEncrypt(data, publicKey []byte) ([]byte, error) {
-	block, _ := pem.Decode(publicKey)
-
-	if block == nil {
-		return nil, errors.New("gochat: invalid rsa public key")
-	}
-
-	pubKey, err := x509.ParsePKIXPublicKey(block.Bytes)
-
+	random, rawMsgXMLBytes, getAppIDBytes, err = AESDecrypt(encryptedMsgBytes, key)
 	if err != nil {
-		return nil, err
+		err = fmt.Errorf("消息解密失败,%v", err)
+		return
 	}
-
-	key, ok := pubKey.(*rsa.PublicKey)
-
-	if !ok {
-		return nil, errors.New("gochat: invalid rsa public key")
+	if appID != string(getAppIDBytes) {
+		err = fmt.Errorf("消息解密校验APPID失败")
+		return
 	}
-
-	return rsa.EncryptPKCS1v15(rand.Reader, key, data)
+	return
 }
 
-// RSADecrypt rsa decryption with private key
-func RSADecrypt(cipherText, privateKey []byte) ([]byte, error) {
-	block, _ := pem.Decode(privateKey)
-
-	if block == nil {
-		return nil, errors.New("gochat: invalid rsa private key")
+func aesKeyDecode(encodedAESKey string) (key []byte, err error) {
+	if len(encodedAESKey) != 43 {
+		err = fmt.Errorf("the length of encodedAESKey must be equal to 43")
+		return
 	}
-
-	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-
+	key, err = base64.StdEncoding.DecodeString(encodedAESKey + "=")
 	if err != nil {
-		return nil, err
+		return
 	}
-
-	return rsa.DecryptPKCS1v15(rand.Reader, key, cipherText)
+	if len(key) != 32 {
+		err = fmt.Errorf("encodingAESKey invalid")
+		return
+	}
+	return
 }
 
-func ZeroPadding(cipherText []byte, blockSize int) []byte {
-	padding := blockSize - len(cipherText)%blockSize
-	padText := bytes.Repeat([]byte{0}, padding)
+// AESDecrypt ciphertext = AES_Encrypt[random(16B) + msg_len(4B) + rawXMLMsg + appId]
+//参考：github.com/chanxuehong/wechat.v2
+func AESDecrypt(ciphertext []byte, aesKey []byte) (random, rawXMLMsg, appID []byte, err error) {
+	const (
+		BlockSize = 32            // PKCS#7
+		BlockMask = BlockSize - 1 // BLOCK_SIZE 为 2^n 时, 可以用 mask 获取针对 BLOCK_SIZE 的余数
+	)
 
-	return append(cipherText, padText...)
-}
-
-func ZeroUnPadding(plainText []byte) []byte {
-	return bytes.TrimRightFunc(plainText, func(r rune) bool {
-		return r == rune(0)
-	})
-}
-
-func PKCS5Padding(cipherText []byte, blockSize int) []byte {
-	padding := blockSize - len(cipherText)%blockSize
-
-	if padding == 0 {
-		padding = blockSize
+	if len(ciphertext) < BlockSize {
+		err = fmt.Errorf("the length of ciphertext too short: %d", len(ciphertext))
+		return
+	}
+	if len(ciphertext)&BlockMask != 0 {
+		err = fmt.Errorf("ciphertext is not a multiple of the block size, the length is %d", len(ciphertext))
+		return
 	}
 
-	padText := bytes.Repeat([]byte{byte(padding)}, padding)
+	plaintext := make([]byte, len(ciphertext)) // len(plaintext) >= BLOCK_SIZE
 
-	return append(cipherText, padText...)
+	// 解密
+	block, err := aes.NewCipher(aesKey)
+	if err != nil {
+		panic(err)
+	}
+	mode := cipher.NewCBCDecrypter(block, aesKey[:16])
+	mode.CryptBlocks(plaintext, ciphertext)
+
+	// PKCS#7 去除补位
+	amountToPad := int(plaintext[len(plaintext)-1])
+	if amountToPad < 1 || amountToPad > BlockSize {
+		err = fmt.Errorf("the amount to pad is incorrect: %d", amountToPad)
+		return
+	}
+	plaintext = plaintext[:len(plaintext)-amountToPad]
+
+	// 反拼接
+	// len(plaintext) == 16+4+len(rawXMLMsg)+len(appId)
+	if len(plaintext) <= 20 {
+		err = fmt.Errorf("plaintext too short, the length is %d", len(plaintext))
+		return
+	}
+	rawXMLMsgLen := int(decodeNetworkByteOrder(plaintext[16:20]))
+	if rawXMLMsgLen < 0 {
+		err = fmt.Errorf("incorrect msg length: %d", rawXMLMsgLen)
+		return
+	}
+	appIDOffset := 20 + rawXMLMsgLen
+	if len(plaintext) <= appIDOffset {
+		err = fmt.Errorf("msg length too large: %d", rawXMLMsgLen)
+		return
+	}
+
+	random = plaintext[:16:20]
+	rawXMLMsg = plaintext[20:appIDOffset:appIDOffset]
+	appID = plaintext[appIDOffset:]
+	return
 }
 
-func PKCS5Unpadding(plainText []byte, blockSize int) []byte {
-	l := len(plainText)
-	unpadding := int(plainText[l-1])
-
-	if unpadding < 1 || unpadding > blockSize {
-		unpadding = 0
-	}
-
-	return plainText[:(l - unpadding)]
+// 把整数 n 格式化成 4 字节的网络字节序
+func encodeNetworkByteOrder(orderBytes []byte, n uint32) {
+	orderBytes[0] = byte(n >> 24)
+	orderBytes[1] = byte(n >> 16)
+	orderBytes[2] = byte(n >> 8)
+	orderBytes[3] = byte(n)
 }
 
-// --------- AES-256-ECB ---------
-
-type ecb struct {
-	b         cipher.Block
-	blockSize int
+// 从 4 字节的网络字节序里解析出整数
+func decodeNetworkByteOrder(orderBytes []byte) (n uint32) {
+	return uint32(orderBytes[0])<<24 |
+		uint32(orderBytes[1])<<16 |
+		uint32(orderBytes[2])<<8 |
+		uint32(orderBytes[3])
 }
 
-func newECB(b cipher.Block) *ecb {
-	return &ecb{
-		b:         b,
-		blockSize: b.BlockSize(),
+// CalculateSign 计算签名
+func CalculateSign(content, signType, key string) (string, error) {
+	var h hash.Hash
+	if signType == SignTypeHMACSHA256 {
+		h = hmac.New(sha256.New, []byte(key))
+	} else {
+		h = md5.New()
 	}
+
+	if _, err := h.Write([]byte(content)); err != nil {
+		return ``, err
+	}
+	return strings.ToUpper(hex.EncodeToString(h.Sum(nil))), nil
 }
 
-type ecbEncrypter ecb
+// ParamSign 计算所传参数的签名
+func ParamSign(p map[string]string, key string) (string, error) {
+	bizKey := "&key=" + key
+	str := OrderParam(p, bizKey)
 
-// NewECBEncrypter returns a BlockMode which encrypts in electronic code book mode, using the given Block.
-func NewECBEncrypter(b cipher.Block) cipher.BlockMode {
-	return (*ecbEncrypter)(newECB(b))
-}
-
-func (x *ecbEncrypter) BlockSize() int { return x.blockSize }
-
-func (x *ecbEncrypter) CryptBlocks(dst, src []byte) {
-	if len(src)%x.blockSize != 0 {
-		panic("crypto/cipher: input not full blocks")
+	var signType string
+	switch p["sign_type"] {
+	case SignTypeMD5, SignTypeHMACSHA256:
+		signType = p["sign_type"]
+	case ``:
+		signType = SignTypeMD5
+	default:
+		return ``, errors.New(`invalid sign_type`)
 	}
 
-	if len(dst) < len(src) {
-		panic("crypto/cipher: output smaller than input")
-	}
-
-	for len(src) > 0 {
-		x.b.Encrypt(dst, src[:x.blockSize])
-		src = src[x.blockSize:]
-		dst = dst[x.blockSize:]
-	}
-}
-
-type ecbDecrypter ecb
-
-// NewECBDecrypter returns a BlockMode which decrypts in electronic code book mode, using the given Block.
-func NewECBDecrypter(b cipher.Block) cipher.BlockMode {
-	return (*ecbDecrypter)(newECB(b))
-}
-
-func (x *ecbDecrypter) BlockSize() int { return x.blockSize }
-
-func (x *ecbDecrypter) CryptBlocks(dst, src []byte) {
-	if len(src)%x.blockSize != 0 {
-		panic("crypto/cipher: input not full blocks")
-	}
-
-	if len(dst) < len(src) {
-		panic("crypto/cipher: output smaller than input")
-	}
-
-	for len(src) > 0 {
-		x.b.Decrypt(dst, src[:x.blockSize])
-
-		src = src[x.blockSize:]
-		dst = dst[x.blockSize:]
-	}
+	return CalculateSign(str, signType, key)
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/wepkg/wechat"
@@ -20,11 +21,14 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		wechat.Token("<token>"),
 		wechat.AESKey("<encodingAESKey>"),
 	)
-	mp := app.Offiaccount()
+	// mp := app.Offiaccount()
 	//PassiveUserReply_message
-	mp.Reply(func() {
+	// mp.Reply(func() {
 
-	})
+	// })
 	// mp.OnEvent(wechat.PassiveReply)
-	mp.Handler(w, r)
+	// mp.Handler(w, r)
+
+	weapp := app.Miniprogram()
+	weapp.Code2Session(context.TODO(), "test")
 }
