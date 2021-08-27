@@ -131,3 +131,6 @@ type ReceivingHandler func(message.Context)
 func (o *Offiaccount) SetReceivingHandler(h ReceivingHandler) {
 	o.ReceivingHandler = h
 }
+
+//github.com/dcsunny/wechat
+//github.com/shenghui0779/gochat
